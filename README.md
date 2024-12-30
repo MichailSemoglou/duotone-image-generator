@@ -32,7 +32,7 @@ This Python application generates multiple duotone variations of an input image.
 
 1. Run the script:
    ```
-   python src/duotone_generator.py
+   python3 duotone_generator.py
    ```
 
 2. A file dialog will open. Select the image you want to process.
