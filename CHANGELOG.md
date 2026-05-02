@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-05-03
+
+### Added
+
+- `convert_to_duotone` now accepts an optional `output_dir` argument so the output folder is always placed in a known location, independent of where the source file lives. Omitting the argument preserves the original sibling-of-source behaviour.
+- The GUI (`select_image`) now opens a second dialog prompting the user to choose an output directory. Cancelling either dialog aborts cleanly with no side effects.
+
 ## [1.1.0] - 2026-04-29
 
 ### Added
