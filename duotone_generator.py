@@ -6,10 +6,14 @@ import os
 from tkinter import filedialog, messagebox
 
 def select_image():
-    """Open a file dialog to select an image and process it."""
+    """Open file dialogs to select a source image and an output directory, then process."""
     image_path = filedialog.askopenfilename(filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.gif")])
-    if image_path:
-        convert_to_duotone(image_path)
+    if not image_path:
+        return
+    output_dir = filedialog.askdirectory(title="Select output directory")
+    if not output_dir:
+        return
+    convert_to_duotone(image_path, output_dir=output_dir)
 
 def generate_random_color():
     """Generate a random RGB color."""
@@ -38,7 +42,7 @@ def create_duotone_image(gray, color1, color2):
     duotone_rgb = np.clip(duotone * 255, 0, 255).astype(np.uint8)
     return cv2.cvtColor(duotone_rgb, cv2.COLOR_RGB2BGR)
 
-def convert_to_duotone(image_path):
+def convert_to_duotone(image_path, output_dir=None):
     """
     Convert an image to 100 duotone variations and save them to disk.
 
@@ -50,10 +54,14 @@ def convert_to_duotone(image_path):
     Args:
         image_path (str): Absolute or relative path to the source image.
             Supported formats: JPEG, PNG, BMP, GIF.
+        output_dir (str | None): Directory under which the
+            '<image_stem>_duotone_variations' folder is created.  When None
+            (default) the folder is placed alongside the source image.
 
     Side effects:
-        Creates a sibling folder '<image_stem>_duotone_variations/' containing
-        100 PNG files and one 'colors.csv' file.
+        Creates '<output_dir>/<image_stem>_duotone_variations/' (or a sibling
+        folder when output_dir is None) containing 100 PNG files and one
+        'colors.csv' file.
     """
     try:
         image = cv2.imread(image_path)
@@ -62,7 +70,9 @@ def convert_to_duotone(image_path):
 
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255
 
-        output_folder = f"{os.path.splitext(image_path)[0]}_duotone_variations"
+        stem = os.path.splitext(os.path.basename(image_path))[0]
+        base = output_dir if output_dir is not None else os.path.dirname(image_path)
+        output_folder = os.path.join(base, f"{stem}_duotone_variations")
         os.makedirs(output_folder, exist_ok=True)
 
         color_records = []
