@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Output images are now saved as lossless **PNG** files, preserving full colour fidelity for use in design tools.
-- Filenames now use **human-readable hex colour codes** in RGB order (e.g. `083_#2CD2B4_#DC1E5A.png`), making it straightforward to copy a value directly into Figma, Illustrator, or a style guide.
+- Filenames now use **human-readable hex colour codes** in RGB order (e.g. `083_2CD2B4_DC1E5A.png`), making it straightforward to copy a value directly into Figma, Illustrator, or a style guide.
 - A **`colors.csv` sidecar file** is written alongside each batch. It lists every variation's index and both hex codes, enabling designers to reference or share the full palette without opening individual files.
 
 ### Fixed
