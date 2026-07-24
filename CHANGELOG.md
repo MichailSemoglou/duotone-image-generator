@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `convert_to_duotone` now raises `IOError` when `cv2.imwrite` fails (for example, an unwritable output directory) instead of reporting success.
 - `hex_to_rgb` no longer accepts strings with more than one leading `#`.
 - Running with no arguments on a system without tkinter now exits with a clear message instead of a raw `ImportError` traceback.
+- Stale variation PNG files are now removed from the output folder before each new batch is written, so repeated runs leave only the current batch's images.
 
 ## [1.1.1] - 2026-05-03
 
