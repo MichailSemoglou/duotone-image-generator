@@ -7,20 +7,18 @@ Run with:
 
 import csv
 import os
-import tempfile
-from unittest.mock import patch
+import random
+import subprocess
+import sys
+from pathlib import Path
 
 import cv2
 import numpy as np
 import pytest
 
-# Suppress any tkinter display attempts during import on headless systems.
-import tkinter.filedialog
-import tkinter.messagebox
-with patch("tkinter.filedialog.askopenfilename", return_value=""), \
-     patch("tkinter.messagebox.showinfo"), \
-     patch("tkinter.messagebox.showerror"):
-    import duotone_generator as dg
+import duotone_generator as dg
+
+SCRIPT = Path(__file__).resolve().parent / "duotone_generator.py"
 
 
 # ---------------------------------------------------------------------------
@@ -34,7 +32,7 @@ class TestRgbToHex:
     def test_white(self):
         assert dg.rgb_to_hex([255, 255, 255]) == "#FFFFFF"
 
-    def test_known_colour(self):
+    def test_known_color(self):
         assert dg.rgb_to_hex([44, 210, 180]) == "#2CD2B4"
 
     def test_uppercase(self):
@@ -47,6 +45,37 @@ class TestRgbToHex:
 
     def test_length(self):
         assert len(dg.rgb_to_hex([10, 20, 30])) == 7
+
+
+# ---------------------------------------------------------------------------
+# hex_to_rgb
+# ---------------------------------------------------------------------------
+
+class TestHexToRgb:
+    def test_with_hash(self):
+        assert dg.hex_to_rgb("#2CD2B4") == [44, 210, 180]
+
+    def test_without_hash(self):
+        assert dg.hex_to_rgb("2CD2B4") == [44, 210, 180]
+
+    def test_lowercase(self):
+        assert dg.hex_to_rgb("#2cd2b4") == [44, 210, 180]
+
+    def test_round_trip(self):
+        assert dg.hex_to_rgb(dg.rgb_to_hex([1, 2, 3])) == [1, 2, 3]
+
+    def test_wrong_length_raises(self):
+        with pytest.raises(ValueError, match="Invalid hex color"):
+            dg.hex_to_rgb("#FFF")
+
+    def test_invalid_characters_raise(self):
+        with pytest.raises(ValueError, match="Invalid hex color"):
+            dg.hex_to_rgb("#GGGGGG")
+
+    def test_multiple_hash_prefixes_raise(self):
+        # lstrip-style over-acceptance: only one leading '#' is allowed.
+        with pytest.raises(ValueError, match="Invalid hex color"):
+            dg.hex_to_rgb("##FF0000")
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +101,11 @@ class TestGenerateRandomColor:
         # Astronomically unlikely to collide 20 times in a row.
         colors = [tuple(dg.generate_random_color()) for _ in range(20)]
         assert len(set(colors)) > 1
+
+    def test_seeded_rng_instances_match(self):
+        rng_a = random.Random(1)
+        rng_b = random.Random(1)
+        assert dg.generate_random_color(rng_a) == dg.generate_random_color(rng_b)
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +150,7 @@ class TestCreateDuotoneImage:
         assert pixel == pytest.approx(expected_bgr, abs=1)
 
     def test_output_is_bgr_not_rgb(self):
-        # A pure-red RGB colour (255,0,0) should appear as (0,0,255) in BGR.
+        # A pure-red RGB color (255,0,0) should appear as (0,0,255) in BGR.
         gray = self._flat_gray(0.0)
         result = dg.create_duotone_image(gray, [255, 0, 0], [0, 0, 0])
         b, _, r = result[0, 0]
@@ -139,7 +173,7 @@ class TestConvertToDuotone:
 
     @pytest.fixture
     def source_image(self, tmp_path):
-        """Write a small solid-colour PNG and return its path."""
+        """Write a small solid-color PNG and return its path."""
         img = np.zeros((16, 16, 3), dtype=np.uint8)
         img[:] = [128, 64, 192]
         path = str(tmp_path / "source.png")
@@ -147,9 +181,7 @@ class TestConvertToDuotone:
         return path
 
     def _run(self, source_image):
-        with patch("tkinter.messagebox.showinfo"), \
-             patch("tkinter.messagebox.showerror"):
-            dg.convert_to_duotone(source_image)
+        dg.convert_to_duotone(source_image)
 
     def test_output_folder_created(self, source_image, tmp_path):
         self._run(source_image)
@@ -203,9 +235,178 @@ class TestConvertToDuotone:
                 assert (folder / expected_name).exists(), \
                     f"File {expected_name} not found"
 
-    def test_invalid_path_does_not_raise(self, tmp_path):
-        # messagebox.showerror should be called, not an uncaught exception.
-        with patch("tkinter.messagebox.showerror") as mock_err, \
-             patch("tkinter.messagebox.showinfo"):
+    def test_returns_output_folder_and_color_records(self, source_image, tmp_path):
+        output_folder, records = dg.convert_to_duotone(source_image)
+        assert output_folder == str(tmp_path / "source_duotone_variations")
+        assert len(records) == 100
+        assert all(len(record) == 3 for record in records)
+
+    def test_custom_output_dir(self, source_image, tmp_path):
+        out_dir = tmp_path / "custom_out"
+        out_dir.mkdir()
+        output_folder, _ = dg.convert_to_duotone(source_image, output_dir=str(out_dir))
+        assert output_folder == str(out_dir / "source_duotone_variations")
+        assert (out_dir / "source_duotone_variations").is_dir()
+
+    def test_invalid_path_raises(self, tmp_path):
+        # The pipeline raises instead of reporting via a messagebox.
+        with pytest.raises(ValueError, match="Failed to load image"):
             dg.convert_to_duotone(str(tmp_path / "nonexistent.png"))
-        mock_err.assert_called_once()
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="chmod-based read-only directories do not block writes on Windows",
+    )
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root bypasses permission bits on read-only directories",
+    )
+    def test_unwritable_output_raises(self, source_image, tmp_path):
+        # cv2.imwrite returns False when it cannot write; that must surface.
+        folder = tmp_path / "out" / "source_duotone_variations"
+        folder.mkdir(parents=True)
+        folder.chmod(0o555)
+        try:
+            with pytest.raises(IOError, match="Failed to write"):
+                dg.convert_to_duotone(source_image, output_dir=str(tmp_path / "out"))
+        finally:
+            folder.chmod(0o755)
+
+    # -- count ------------------------------------------------------------
+
+    def test_count_limits_number_of_variations(self, source_image, tmp_path):
+        _, records = dg.convert_to_duotone(source_image, count=5)
+        folder = tmp_path / "source_duotone_variations"
+        assert len(records) == 5
+        assert len(list(folder.glob("*.png"))) == 5
+
+    def test_count_must_be_positive(self, source_image):
+        with pytest.raises(ValueError, match="count must be at least 1"):
+            dg.convert_to_duotone(source_image, count=0)
+
+    # -- seed -------------------------------------------------------------
+
+    def test_seed_produces_identical_batches(self, source_image, tmp_path):
+        _, records_a = dg.convert_to_duotone(source_image, output_dir=str(tmp_path / "a"), seed=42)
+        _, records_b = dg.convert_to_duotone(source_image, output_dir=str(tmp_path / "b"), seed=42)
+        assert records_a == records_b
+
+    def test_seed_matches_known_sequence(self, source_image, tmp_path):
+        # random.Random(42) deterministically yields this exact first pair.
+        _, records = dg.convert_to_duotone(source_image, seed=42)
+        assert records[0] == [0, "#390C8C", "#7D7247"]
+        folder = tmp_path / "source_duotone_variations"
+        assert (folder / "000_390C8C_7D7247.png").is_file()
+
+    # -- explicit colors -------------------------------------------------
+
+    def test_explicit_colors_produce_single_variation(self, source_image, tmp_path):
+        _, records = dg.convert_to_duotone(
+            source_image, colors=[([44, 210, 180], [220, 30, 90])]
+        )
+        assert records == [[0, "#2CD2B4", "#DC1E5A"]]
+        folder = tmp_path / "source_duotone_variations"
+        assert (folder / "000_2CD2B4_DC1E5A.png").is_file()
+
+    def test_explicit_colors_one_variation_per_pair(self, source_image, tmp_path):
+        pairs = [([255, 0, 0], [0, 0, 255]), ([0, 0, 0], [255, 255, 255])]
+        _, records = dg.convert_to_duotone(source_image, colors=pairs)
+        assert records == [[0, "#FF0000", "#0000FF"], [1, "#000000", "#FFFFFF"]]
+
+    def test_empty_colors_raises(self, source_image):
+        with pytest.raises(ValueError, match="at least one"):
+            dg.convert_to_duotone(source_image, colors=[])
+
+
+# ---------------------------------------------------------------------------
+# main (CLI)
+# ---------------------------------------------------------------------------
+
+class TestMain:
+    """Tests for the command-line entry point."""
+
+    @pytest.fixture
+    def source_image(self, tmp_path):
+        """Write a small solid-color PNG and return its path."""
+        img = np.zeros((16, 16, 3), dtype=np.uint8)
+        img[:] = [128, 64, 192]
+        path = str(tmp_path / "source.png")
+        cv2.imwrite(path, img)
+        return path
+
+    def test_cli_generates_variations(self, source_image, tmp_path, capsys):
+        dg.main([source_image])
+        assert (tmp_path / "source_duotone_variations").is_dir()
+        assert "generated successfully" in capsys.readouterr().out
+
+    def test_cli_output_dir_option(self, source_image, tmp_path):
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        dg.main([source_image, "--output-dir", str(out_dir)])
+        assert (out_dir / "source_duotone_variations").is_dir()
+
+    def test_cli_invalid_path_exits_nonzero(self, tmp_path):
+        with pytest.raises(SystemExit) as exc_info:
+            dg.main([str(tmp_path / "nonexistent.png")])
+        assert exc_info.value.code == 1
+
+    def test_no_arguments_launches_gui(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(dg, "select_image", lambda: calls.append(True))
+        dg.main([])
+        assert calls == [True]
+
+    def test_no_arguments_without_tkinter_exits_cleanly(self, monkeypatch):
+        def raise_import_error():
+            raise ImportError("No module named 'tkinter'")
+
+        monkeypatch.setattr(dg, "select_image", raise_import_error)
+        with pytest.raises(SystemExit) as exc_info:
+            dg.main([])
+        assert exc_info.value.code == 1
+
+    def test_cli_count_option(self, source_image, tmp_path):
+        dg.main([source_image, "--count", "3"])
+        folder = tmp_path / "source_duotone_variations"
+        assert len(list(folder.glob("*.png"))) == 3
+
+    def test_cli_seed_is_reproducible(self, source_image, tmp_path):
+        dg.main([source_image, "-o", str(tmp_path / "a"), "--seed", "7"])
+        dg.main([source_image, "-o", str(tmp_path / "b"), "--seed", "7"])
+        names_a = sorted(p.name for p in (tmp_path / "a" / "source_duotone_variations").glob("*.png"))
+        names_b = sorted(p.name for p in (tmp_path / "b" / "source_duotone_variations").glob("*.png"))
+        assert names_a == names_b
+        assert len(names_a) == 100
+
+    def test_cli_colors_generates_single_variation(self, source_image, tmp_path):
+        dg.main([source_image, "--colors", "#2CD2B4,#DC1E5A"])
+        folder = tmp_path / "source_duotone_variations"
+        assert [p.name for p in folder.glob("*.png")] == ["000_2CD2B4_DC1E5A.png"]
+
+    def test_cli_colors_conflicts_with_count_and_seed(self, source_image):
+        for extra in (["--count", "5"], ["--seed", "1"]):
+            with pytest.raises(SystemExit) as exc_info:
+                dg.main([source_image, "--colors", "#2CD2B4,#DC1E5A"] + extra)
+            assert exc_info.value.code == 2
+
+    def test_cli_invalid_hex_exits_with_usage_error(self, source_image):
+        with pytest.raises(SystemExit) as exc_info:
+            dg.main([source_image, "--colors", "notahex"])
+        assert exc_info.value.code == 2
+
+    def test_cli_flags_without_image_are_rejected(self):
+        with pytest.raises(SystemExit) as exc_info:
+            dg.main(["--count", "5"])
+        assert exc_info.value.code == 2
+
+    def test_script_entry_point_generates_variations(self, source_image, tmp_path):
+        # Exercises `if __name__ == "__main__"`, which the import-based
+        # tests above never reach.
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), source_image, "--count", "2"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        assert "2 duotone variations" in result.stdout
+        folder = tmp_path / "source_duotone_variations"
+        assert len(list(folder.glob("*.png"))) == 2
