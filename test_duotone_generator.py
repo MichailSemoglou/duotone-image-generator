@@ -163,6 +163,13 @@ class TestCreateDuotoneImage:
         assert result.max() <= 255
         assert result.min() >= 0
 
+    def test_midtones_round_to_nearest_uint8(self):
+        # 0.5 * 255 = 127.5 must round to 128, not truncate to 127. Every
+        # intermediate here is exact in float32, so exact equality holds.
+        gray = self._flat_gray(0.5)
+        result = dg.create_duotone_image(gray, [0, 0, 0], [255, 255, 255])
+        assert result[0, 0].tolist() == [128, 128, 128]
+
 
 # ---------------------------------------------------------------------------
 # convert_to_duotone  (integration — writes real files to a temp dir)
@@ -272,6 +279,46 @@ class TestConvertToDuotone:
         finally:
             folder.chmod(0o755)
 
+    # -- input hardening ----------------------------------------------------
+
+    def test_unsupported_extension_raises(self, source_image, tmp_path):
+        # Valid PNG content under a .gif name must still be rejected: the
+        # extension is checked before any decoding happens.
+        renamed = tmp_path / "renamed.gif"
+        renamed.write_bytes(Path(source_image).read_bytes())
+        with pytest.raises(ValueError, match="Unsupported image format"):
+            dg.convert_to_duotone(str(renamed))
+
+    def test_missing_extension_raises(self, source_image, tmp_path):
+        renamed = tmp_path / "source"
+        renamed.write_bytes(Path(source_image).read_bytes())
+        with pytest.raises(ValueError, match="Unsupported image format"):
+            dg.convert_to_duotone(str(renamed))
+
+    def test_uppercase_extension_accepted(self, source_image, tmp_path):
+        upper = tmp_path / "UPPER.PNG"
+        upper.write_bytes(Path(source_image).read_bytes())
+        _, records = dg.convert_to_duotone(str(upper), count=1)
+        assert len(records) == 1
+
+    def test_zero_byte_file_raises(self, tmp_path):
+        empty = tmp_path / "empty.png"
+        empty.touch()
+        with pytest.raises(ValueError, match="file is empty"):
+            dg.convert_to_duotone(str(empty))
+
+    def test_oversized_image_raises(self, source_image, monkeypatch):
+        # A 16x16 source with the limit patched down to 8 exercises the guard
+        # without allocating a real gigapixel image.
+        monkeypatch.setattr(dg, "MAX_IMAGE_DIMENSION", 8)
+        with pytest.raises(ValueError, match="maximum supported dimension"):
+            dg.convert_to_duotone(source_image)
+
+    def test_image_at_exact_dimension_limit_accepted(self, source_image, monkeypatch):
+        monkeypatch.setattr(dg, "MAX_IMAGE_DIMENSION", 16)
+        _, records = dg.convert_to_duotone(source_image, count=1)
+        assert len(records) == 1
+
     # -- count ------------------------------------------------------------
 
     def test_count_limits_number_of_variations(self, source_image, tmp_path):
@@ -316,6 +363,27 @@ class TestConvertToDuotone:
     def test_empty_colors_raises(self, source_image):
         with pytest.raises(ValueError, match="at least one"):
             dg.convert_to_duotone(source_image, colors=[])
+
+    def test_colors_out_of_range_raises(self, source_image):
+        with pytest.raises(ValueError, match="Invalid RGB color"):
+            dg.convert_to_duotone(source_image, colors=[([300, 0, 0], [0, 0, 0])])
+
+    def test_colors_negative_value_raises(self, source_image):
+        with pytest.raises(ValueError, match="Invalid RGB color"):
+            dg.convert_to_duotone(source_image, colors=[([-1, 0, 0], [0, 0, 0])])
+
+    def test_colors_wrong_length_raises(self, source_image):
+        with pytest.raises(ValueError, match="Invalid RGB color"):
+            dg.convert_to_duotone(source_image, colors=[([255, 0], [0, 0, 0])])
+
+    def test_duplicate_color_pairs_raise_before_writing(self, source_image, tmp_path):
+        # Identical pairs map to identical filenames, so the second write
+        # would silently overwrite the first. Validation must fire before
+        # any output is created.
+        pairs = [([255, 0, 0], [0, 0, 255]), ([255, 0, 0], [0, 0, 255])]
+        with pytest.raises(ValueError, match="Duplicate color pair"):
+            dg.convert_to_duotone(source_image, colors=pairs)
+        assert not (tmp_path / "source_duotone_variations").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -410,3 +478,25 @@ class TestMain:
         assert "2 duotone variations" in result.stdout
         folder = tmp_path / "source_duotone_variations"
         assert len(list(folder.glob("*.png"))) == 2
+
+
+# ---------------------------------------------------------------------------
+# headless import
+# ---------------------------------------------------------------------------
+
+class TestHeadlessImport:
+    def test_module_imports_without_tkinter(self):
+        # tkinter is imported lazily inside select_image, so the module must
+        # import on systems where tkinter is not installed at all. Mapping
+        # the name to None in sys.modules makes any 'import tkinter' raise
+        # ImportError in the child process.
+        code = (
+            "import sys; sys.modules['tkinter'] = None; "
+            "import duotone_generator"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True,
+            cwd=SCRIPT.parent,
+        )
+        assert result.returncode == 0, result.stderr

@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-07-25
+
+### Added
+
+- Input validation in `convert_to_duotone`: unsupported file extensions and zero-byte image files are rejected with clear messages before loading, and images whose total pixel count exceeds `MAX_IMAGE_DIMENSION ** 2` (225,000,000 pixels) are rejected from the file header before any decode, so accidental gigapixel inputs cannot exhaust memory.
+- GitHub Actions workflow running `pytest` on push and pull requests across ubuntu, macos, and windows with Python 3.9 through 3.13, plus a Linux step verifying the module imports without tkinter.
+- `convert_to_duotone` validates explicit `colors` pairs and raises `ValueError` for any color that is not three integers in [0, 255]; validation runs before any files are written.
+
+### Changed
+
+- Input loading and validation in `convert_to_duotone` extracted into the `_load_grayscale` and `_validate_color_pairs` helpers. No behavior changes.
+- `requirements.txt` now bounds `opencv-python` to `<5` and `numpy` to `<3`, so fresh installs and CI cannot silently pick up a future major version.
+- The `convert_to_duotone` docstring now documents that `cv2.imread` (IMREAD_COLOR) downconverts 16-bit images to 8-bit and drops alpha channels.
+
+### Fixed
+
+- Duplicate `colors` pairs no longer overwrite each other silently: `convert_to_duotone` raises `ValueError` before writing, since identical pairs map to identical filenames.
+- Duotone pixel values are now rounded to the nearest integer instead of truncated, so midtones are no longer up to one intensity step too dark.
+
 ## [1.2.0] - 2026-07-24
 
 ### Added

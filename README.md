@@ -1,12 +1,15 @@
 # Duotone Image Generator
 
+[![tests](https://github.com/MichailSemoglou/duotone-image-generator/actions/workflows/tests.yml/badge.svg)](https://github.com/MichailSemoglou/duotone-image-generator/actions/workflows/tests.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A Python application that generates duotone variations of an image by blending random or explicit color pairs over the grayscale source. Accepts JPEG, PNG, and BMP input; writes a batch of lossless PNGs (100 by default) plus a `colors.csv` sidecar. Usable through file dialogs, a command-line interface, or as a Python library.
 
 ## Features
 
-- User-friendly image selection via a file dialog
+- Image selection via a file dialog
 - Generates 100 duotone variations as lossless **PNG** files (count configurable)
-- Filenames use **hex color codes** in RGB order (e.g. `083_2CD2B4_DC1E5A.png`) — paste directly into Figma, Illustrator, or your design system
+- Filenames use **hex color codes** in RGB order (e.g. `083_2CD2B4_DC1E5A.png`), ready to paste into Figma, Illustrator, or your design system
 - Produces a **`colors.csv` sidecar** listing every variation's color pair for easy reference and sharing
 - Command-line mode with reproducible batches (`--seed`), configurable variation count (`--count`), and explicit color pairs (`--colors`)
 - Uses OpenCV for efficient image processing
@@ -50,16 +53,16 @@ python3 duotone_generator.py
 
 ### Command-line mode
 
-Pass the image path as an argument to run without any dialogs — suitable for scripting and headless environments:
+Pass the image path as an argument to run without any dialogs, suitable for scripting and headless environments:
 
 ```bash
 python3 duotone_generator.py path/to/image.png [--output-dir DIR] [--count N] [--seed S] [--colors "HEX1,HEX2"]
 ```
 
-- `-o, --output-dir DIR` — place the output folder under DIR instead of alongside the source image.
-- `--count N` — number of random variations (default: 100).
-- `--seed S` — reproduce a batch exactly by reusing its seed.
-- `--colors "#2CD2B4,#DC1E5A"` — apply explicit color pairs instead of random ones; repeatable, one variation per pair. Cannot be combined with `--count` or `--seed`.
+- `-o, --output-dir DIR`: place the output folder under DIR instead of alongside the source image.
+- `--count N`: number of random variations (default: 100).
+- `--seed S`: reproduce a batch exactly by reusing its seed.
+- `--colors "#2CD2B4,#DC1E5A"`: apply explicit color pairs instead of random ones; repeatable, one variation per pair. Cannot be combined with `--count` or `--seed`.
 
 The location of the output folder is printed on completion.
 

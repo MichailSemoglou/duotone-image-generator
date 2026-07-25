@@ -6,11 +6,21 @@ import argparse
 import csv
 import os
 import random
+import struct
 
 import cv2
 import numpy as np
 
 DEFAULT_VARIATION_COUNT = 100
+
+# Extensions accepted by convert_to_duotone. Anything else is rejected before
+# loading, so failures are reported against the advertised formats.
+SUPPORTED_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp")
+
+# Longest permitted image side in pixels. Images whose total pixel count
+# exceeds MAX_IMAGE_DIMENSION ** 2 are rejected from the file header before
+# any decode, so accidental gigapixel inputs cannot exhaust memory.
+MAX_IMAGE_DIMENSION = 15000
 
 
 def _success_message(output_folder: str, count: int) -> str:
@@ -24,7 +34,7 @@ def select_image() -> None:
     from tkinter import filedialog, messagebox
 
     image_path = filedialog.askopenfilename(
-        filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp")]
+        filetypes=[("Image files", " ".join(f"*{e}" for e in SUPPORTED_EXTENSIONS))]
     )
     if not image_path:
         return
@@ -65,7 +75,7 @@ def hex_to_rgb(value: str) -> list[int]:
     try:
         return [int(text[i:i + 2], 16) for i in (0, 2, 4)]
     except ValueError:
-        raise ValueError(f"Invalid hex color '{value}': expected '#RRGGBB'.")
+        raise ValueError(f"Invalid hex color '{value}': expected '#RRGGBB'.") from None
 
 
 def parse_color_pair(spec: str) -> tuple[list[int], list[int]]:
@@ -74,6 +84,50 @@ def parse_color_pair(spec: str) -> tuple[list[int], list[int]]:
     if len(parts) != 2:
         raise ValueError(f"Invalid color pair '{spec}': expected 'HEX1,HEX2'.")
     return hex_to_rgb(parts[0]), hex_to_rgb(parts[1])
+
+
+def _validate_color_pairs(colors: list[tuple[list[int], list[int]]]) -> None:
+    """
+    Validate explicit color pairs and reject duplicates.
+
+    Raises ValueError if any color is not three integers in [0, 255], or if
+    two pairs are identical: identical pairs map to identical filenames, so
+    the second variation would silently overwrite the first.
+    """
+    seen = set()
+    for pair in colors:
+        try:
+            pair_len = len(pair)
+        except TypeError as exc:
+            raise ValueError(
+                f"Invalid color pair {pair!r}: expected a pair of two RGB colors."
+            ) from exc
+        if pair_len != 2:
+            raise ValueError(
+                f"Invalid color pair {pair!r}: expected exactly two RGB colors."
+            )
+        color1, color2 = pair
+        for color in (color1, color2):
+            try:
+                color_len = len(color)
+            except TypeError as exc:
+                raise ValueError(
+                    f"Invalid RGB color {color!r}: expected three integers in [0, 255]."
+                ) from exc
+            if color_len != 3 or not all(
+                isinstance(v, (int, np.integer)) and 0 <= v <= 255 for v in color
+            ):
+                raise ValueError(
+                    f"Invalid RGB color {color}: expected three integers "
+                    "in [0, 255]."
+                )
+        hex_pair = rgb_to_hex(color1), rgb_to_hex(color2)
+        if hex_pair in seen:
+            raise ValueError(
+                f"Duplicate color pair {hex_pair[0]},{hex_pair[1]}: "
+                "each pair may appear only once."
+            )
+        seen.add(hex_pair)
 
 
 def create_duotone_image(
@@ -97,8 +151,117 @@ def create_duotone_image(
     c2 = np.array(color2, dtype=np.float32).reshape(1, 1, 3) / 255
 
     duotone = (1 - gray)[:, :, np.newaxis] * c1 + gray[:, :, np.newaxis] * c2
-    duotone_rgb = np.clip(duotone * 255, 0, 255).astype(np.uint8)
+    duotone_rgb = np.clip(np.rint(duotone * 255), 0, 255).astype(np.uint8)
     return cv2.cvtColor(duotone_rgb, cv2.COLOR_RGB2BGR)
+
+
+_SOF_MARKERS = frozenset({
+    0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+    0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF,
+})
+_JPEG_HEADER_SCAN_LIMIT = 131072  # 128 KiB is enough to reach any SOF marker
+
+
+def _read_image_dimensions(image_path: str, ext: str) -> tuple[int, int]:
+    """
+    Return (width, height) by reading only the file header.
+
+    Reads 24 bytes for PNG, 26 bytes for BMP, and up to
+    _JPEG_HEADER_SCAN_LIMIT bytes for JPEG (stopping at the first SOF
+    marker). Raises ValueError on truncated or unrecognised headers.
+    """
+    try:
+        with open(image_path, "rb") as fh:
+            if ext == ".png":
+                hdr = fh.read(24)
+                if len(hdr) < 24 or hdr[:8] != b"\x89PNG\r\n\x1a\n":
+                    raise ValueError(f"'{image_path}' is not a valid PNG file.")
+                width, height = struct.unpack(">II", hdr[16:24])
+                return width, height
+
+            if ext in (".jpg", ".jpeg"):
+                chunk = fh.read(_JPEG_HEADER_SCAN_LIMIT)
+                if len(chunk) < 4 or chunk[:2] != b"\xff\xd8":
+                    raise ValueError(f"'{image_path}' is not a valid JPEG file.")
+                pos = 2
+                while pos < len(chunk) - 8:
+                    if chunk[pos] != 0xFF:
+                        raise ValueError(
+                            f"Failed to read JPEG dimensions from '{image_path}'."
+                        )
+                    pos += 1
+                    while pos < len(chunk) and chunk[pos] == 0xFF:
+                        pos += 1  # skip padding bytes
+                    if pos >= len(chunk):
+                        break
+                    marker = chunk[pos]
+                    pos += 1
+                    if marker in _SOF_MARKERS:
+                        if pos + 7 > len(chunk):
+                            break
+                        height, width = struct.unpack(">HH", chunk[pos + 3: pos + 7])
+                        return width, height
+                    if marker == 0xD9:  # EOI
+                        break
+                    if marker in range(0xD0, 0xDA) or marker == 0x01:
+                        continue  # standalone markers: no length field
+                    if pos + 2 > len(chunk):
+                        break
+                    seg_len = struct.unpack(">H", chunk[pos: pos + 2])[0]
+                    pos += seg_len
+                raise ValueError(
+                    f"Failed to read JPEG dimensions from '{image_path}'."
+                )
+
+            if ext == ".bmp":
+                hdr = fh.read(26)
+                if len(hdr) < 26 or hdr[:2] != b"BM":
+                    raise ValueError(f"'{image_path}' is not a valid BMP file.")
+                width = abs(struct.unpack("<i", hdr[18:22])[0])
+                height = abs(struct.unpack("<i", hdr[22:26])[0])
+                return width, height
+
+    except OSError as exc:
+        raise ValueError(f"Failed to load image '{image_path}': {exc}") from exc
+    except struct.error as exc:
+        raise ValueError(
+            f"Failed to read image dimensions from '{image_path}': {exc}"
+        ) from exc
+
+    raise ValueError(f"Unsupported extension '{ext}'.")  # unreachable for validated ext
+
+
+def _load_grayscale(image_path: str) -> np.ndarray:
+    """
+    Load an image as a float32 grayscale array normalized to [0, 1].
+
+    Raises ValueError for unsupported extensions, empty files, images whose
+    total pixel count exceeds MAX_IMAGE_DIMENSION ** 2 (checked from the file
+    header before any decode), and undecodable content.
+    """
+    ext = os.path.splitext(image_path)[1].lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise ValueError(
+            f"Unsupported image format '{ext or '(none)'}' for "
+            f"'{image_path}'. Supported formats: JPEG, PNG, BMP."
+        )
+    if os.path.isfile(image_path) and os.path.getsize(image_path) == 0:
+        raise ValueError(
+            f"Failed to load image '{image_path}': the file is empty (0 bytes)."
+        )
+
+    width, height = _read_image_dimensions(image_path, ext)
+    if width * height > MAX_IMAGE_DIMENSION ** 2:
+        raise ValueError(
+            f"Image '{image_path}' is {width}x{height} pixels, exceeding the "
+            f"maximum supported dimension of {MAX_IMAGE_DIMENSION} pixels."
+        )
+
+    image = cv2.imread(image_path)
+    if image is None:
+        raise ValueError(f"Failed to load image '{image_path}'.")
+
+    return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255
 
 
 def convert_to_duotone(
@@ -118,7 +281,9 @@ def convert_to_duotone(
 
     Args:
         image_path: Absolute or relative path to the source image.
-            Supported formats: JPEG, PNG, BMP.
+            Supported formats: JPEG, PNG, BMP. Loading uses cv2.imread
+            with IMREAD_COLOR, so 16-bit images are downconverted to
+            8-bit and alpha channels are dropped.
         output_dir: Directory under which the
             '<image_stem>_duotone_variations' folder is created. When None
             (default) the folder is placed alongside the source image.
@@ -136,26 +301,31 @@ def convert_to_duotone(
         ``[index, color_1_hex, color_2_hex]`` rows, one per variation.
 
     Raises:
-        ValueError: If the source image cannot be loaded, `count` is below 1,
-            or `colors` is an empty list.
+        ValueError: If `image_path` has an unsupported extension (supported
+            formats: JPEG, PNG, BMP), the file is empty (0 bytes), the image
+            cannot be decoded, or either dimension exceeds
+            MAX_IMAGE_DIMENSION (checked after decoding, so the guard bounds
+            the float32 conversion rather than the initial decode). Also if
+            `count` is below 1, `colors` is an empty list, an explicit color
+            is not three integers in [0, 255], or two color pairs are
+            identical.
         IOError: If a variation file cannot be written to disk.
 
     Side effects:
         Creates '<output_dir>/<image_stem>_duotone_variations/' (or a sibling
         folder when output_dir is None) containing one PNG per variation and
-        one 'colors.csv' file.
+        one 'colors.csv' file. Existing PNG files in the output folder are
+        removed before each batch is written.
     """
     if colors is None:
         if count < 1:
             raise ValueError(f"count must be at least 1, got {count}.")
     elif not colors:
         raise ValueError("colors must contain at least one color pair.")
+    else:
+        _validate_color_pairs(colors)
 
-    image = cv2.imread(image_path)
-    if image is None:
-        raise ValueError(f"Failed to load image '{image_path}'.")
-
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255
+    gray = _load_grayscale(image_path)
 
     if colors is None:
         rng = random.Random(seed)
